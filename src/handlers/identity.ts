@@ -13,7 +13,11 @@ import { issueSendAccessToken } from './sends';
 const TWO_FACTOR_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const TWO_FACTOR_PROVIDER_AUTHENTICATOR = 0;
 const TWO_FACTOR_PROVIDER_REMEMBER = 5;
-const TWO_FACTOR_PROVIDER_RECOVERY_CODE = 8;
+// Android client (2026.2.x) deserializes TwoFactorProviders2 keys with -1 for recovery code.
+// Keep request parsing backward-compatible with historical provider values (8 / 100).
+const TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE = '-1';
+const TWO_FACTOR_PROVIDER_RECOVERY_CODE_LEGACY = 8;
+const TWO_FACTOR_PROVIDER_RECOVERY_CODE_ANDROID_REQUEST = 100;
 
 function resolveTotpSecret(userSecret: string | null, envSecret: string | undefined): string | null {
   if (userSecret && isTotpEnabled(userSecret)) {
@@ -27,7 +31,7 @@ function resolveTotpSecret(userSecret: string | null, envSecret: string | undefi
 
 function twoFactorRequiredResponse(message: string = 'Two factor required.', includeRecoveryCode: boolean = false): Response {
   const providers = includeRecoveryCode
-    ? [String(TWO_FACTOR_PROVIDER_AUTHENTICATOR), String(TWO_FACTOR_PROVIDER_RECOVERY_CODE)]
+    ? [String(TWO_FACTOR_PROVIDER_AUTHENTICATOR), TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE]
     : [String(TWO_FACTOR_PROVIDER_AUTHENTICATOR)];
   const providers2: Record<string, null> = {};
   for (const provider of providers) providers2[provider] = null;
@@ -168,13 +172,8 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
         return twoFactorRequiredResponse('Two factor required.', canUseRecoveryCode);
       }
 
-      const parsedProvider = Number.parseInt(normalizedTwoFactorProvider, 10);
-      if (!Number.isFinite(parsedProvider)) {
-        return twoFactorRequiredResponse('Two factor required.', canUseRecoveryCode);
-      }
-
       let passedByRememberToken = false;
-      if (parsedProvider === TWO_FACTOR_PROVIDER_REMEMBER) {
+      if (normalizedTwoFactorProvider === String(TWO_FACTOR_PROVIDER_REMEMBER)) {
         if (deviceInfo.deviceIdentifier) {
           const trustedUserId = await storage.getTrustedTwoFactorDeviceTokenUserId(
             normalizedTwoFactorToken,
@@ -187,12 +186,16 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
         if (!passedByRememberToken) {
           return twoFactorRequiredResponse('Two factor required.', canUseRecoveryCode);
         }
-      } else if (parsedProvider === TWO_FACTOR_PROVIDER_AUTHENTICATOR) {
+      } else if (normalizedTwoFactorProvider === String(TWO_FACTOR_PROVIDER_AUTHENTICATOR)) {
         const totpOk = await verifyTotpToken(effectiveTotpSecret, normalizedTwoFactorToken);
         if (!totpOk) {
           return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
         }
-      } else if (parsedProvider === TWO_FACTOR_PROVIDER_RECOVERY_CODE) {
+      } else if (
+        normalizedTwoFactorProvider === TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE ||
+        normalizedTwoFactorProvider === String(TWO_FACTOR_PROVIDER_RECOVERY_CODE_LEGACY) ||
+        normalizedTwoFactorProvider === String(TWO_FACTOR_PROVIDER_RECOVERY_CODE_ANDROID_REQUEST)
+      ) {
         if (!recoveryCodeEquals(normalizedTwoFactorToken, user.totpRecoveryCode)) {
           return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
         }
